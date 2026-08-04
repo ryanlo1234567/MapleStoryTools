@@ -914,6 +914,8 @@ function hexaStat(source,config,isAdd=true){
   return source
 }
 const hexaPositions = ['primary','secondary1','secondary2']
+//遊戲規則：所有核心的次要屬性中，同一種屬性最多只能出現兩次
+const hexaSecMaxCount = 2
 function hexaPrimaryRate(level){
   //主要屬性在5、8、10等會多一段加成
   return level + Math.max(level-4,0) + Math.max(level-7,0) + Math.max(level-9,0)
@@ -988,7 +990,7 @@ async function calcHexaState() {
       return
     }
 
-    const hdns = []
+    const hdns = [],hsns = {}
     //等級欄位可能被清空成null，統一轉成數字再計算
     const calcHexaData = hexaData.value.slice(0,hexaCoreNums.value).map(data=>({
       primary:{level:Number(data.primary.level)||0,name:data.primary.name},
@@ -1002,6 +1004,16 @@ async function calcHexaState() {
           return
         }
         hdns.push(data.primary.name)
+      }
+
+      for (const position of ['secondary1','secondary2']){
+        const name = data[position].name
+        if (name==="" || data[position].level<=0) continue
+        hsns[name] = (hsns[name]||0) + 1
+        if (hsns[name] > hexaSecMaxCount){
+          hexaStateLogs.value += `${props[name]}在多顆HEXA屬性核心的次要屬性中出現超過${hexaSecMaxCount}次，請檢查是否填寫錯誤`
+          return
+        }
       }
 
       const allLv = data.primary.level + data.secondary1.level + data.secondary2.level
@@ -1062,15 +1074,24 @@ async function calcHexaState() {
         }))
       }
     }
+    //所有核心的次要屬性中，同一種屬性最多只能出現兩次（等級0的欄位沒有效果，不列入計算）
+    const secCounts = {}
     function walkSec(index){
       if (index===plan.length){
         checkPlan()
         return
       }
+      const count1 = rates[index].secondary1 > 0,count2 = rates[index].secondary2 > 0
       for (const [n1,n2] of secPlans[index][plan[index].primary.name]){
+        if (count1 && (secCounts[n1]||0) >= hexaSecMaxCount) continue
+        if (count2 && (secCounts[n2]||0) >= hexaSecMaxCount) continue
+        if (count1) secCounts[n1] = (secCounts[n1]||0) + 1
+        if (count2) secCounts[n2] = (secCounts[n2]||0) + 1
         plan[index].secondary1.name = n1
         plan[index].secondary2.name = n2
         walkSec(index+1)
+        if (count1) secCounts[n1]--
+        if (count2) secCounts[n2]--
       }
     }
     //以主屬性排列為單位分批計算，每批之間讓出執行緒，避免畫面卡住
