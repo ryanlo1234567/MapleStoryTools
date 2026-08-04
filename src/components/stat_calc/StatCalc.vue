@@ -72,8 +72,9 @@ watch(
     {immediate:true}
 )
 
-function calcSourceData(data){
-  data = dupeObj(data)
+function calcSourceData(data,buffApplied=false){
+  //buffApplied為true代表傳入的資料已經套用過buff，此時不會修改到傳入的資料，可以省下複製與套用buff的開銷
+  if (!buffApplied) data = dupeObj(data)
   const result = {
     st:0,   //加權後屬性
     wm:0,   //武器係數
@@ -89,7 +90,7 @@ function calcSourceData(data){
   if (!jobs.hasOwnProperty(data.job)){
     return result
   }
-  applyBuff(data)
+  if (!buffApplied) applyBuff(data)
 
   //計算無視
   let mdr = 100
@@ -833,7 +834,8 @@ const hexaStateLogs = ref(""),calcHexaIng = ref(false)
 const hexaCoreNumsOption = [
   {label:"已開啟1顆HEXA核心",value:1},
   {label:"已開啟2顆HEXA核心",value:2},
-  // {label:"已開啟3顆HEXA核心",value:3},
+  {label:"已開啟3顆HEXA核心",value:3},
+  //4顆以上的組合數超過5000萬，暫時無法在瀏覽器內窮舉
   // {label:"已開啟4顆HEXA核心",value:4},
   // {label:"已開啟5顆HEXA核心",value:5},
   // {label:"已開啟6顆HEXA核心",value:6},
@@ -911,148 +913,208 @@ function hexaStat(source,config,isAdd=true){
 
   return source
 }
-function getOneHexaPlans(){
-  //計算單顆核心所有可能的組合
-  const onePlans = []
-  for (const {value:n1} of hexaTypesOption){
-    for (const {value:n2} of hexaTypesOption){
-      if (n1===n2) continue
-      for (const {value:n3} of hexaTypesOption){
-        if (n1===n3 || n2===n3) continue
-        onePlans.push([n1,n2,n3])
-      }
+const hexaPositions = ['primary','secondary1','secondary2']
+function hexaPrimaryRate(level){
+  //主要屬性在5、8、10等會多一段加成
+  return level + Math.max(level-4,0) + Math.max(level-7,0) + Math.max(level-9,0)
+}
+function getHexaPrimaryPlans(coreNums){
+  //各核心的主屬性不能重複，先窮舉所有主屬性的排列
+  const names = hexaTypesOption.map(item=>item.value)
+  const result = [],current = [],used = []
+  function permute(index){
+    if (index===coreNums){
+      result.push(current.slice())
+      return
+    }
+    for (const name of names){
+      if (used.indexOf(name) >= 0) continue
+      used.push(name)
+      current.push(name)
+      permute(index+1)
+      current.pop()
+      used.pop()
     }
   }
-  return onePlans
+  permute(0)
+  return result
 }
-function allHexaPlan(arr,m) {
-  const result = [];
-
-  function permute(currentPermutation) {
-    if (currentPermutation.length === m) {
-      result.push(currentPermutation);
-      return;
-    }
-    for (let i = 0; i < arr.length; i++) {
-      if (currentPermutation.indexOf(arr[i]) === -1) {
-        permute(currentPermutation.concat(arr[i]));
+function getHexaSecPlans(level){
+  //單顆核心在主屬性固定時，所有副屬性的組合，key為主屬性
+  const names = hexaTypesOption.map(item=>item.value)
+  //兩個副屬性等級相同時，(甲,乙)與(乙,甲)的結果完全一樣，只取其一
+  const sameLevel = level.secondary1 === level.secondary2
+  const result = {}
+  for (const primary of names){
+    const plans = [],keys = []
+    for (let i=0;i<names.length;i++){
+      if (names[i]===primary) continue
+      for (let j=0;j<names.length;j++){
+        if (names[j]===primary || j===i) continue
+        if (sameLevel && j < i) continue
+        //等級為0的欄位不影響結果，同樣效果的組合只保留一種
+        const key = (level.secondary1>0?names[i]:'*') + '|' + (level.secondary2>0?names[j]:'*')
+        if (keys.indexOf(key) >= 0) continue
+        keys.push(key)
+        plans.push([names[i],names[j]])
       }
     }
+    result[primary] = plans
   }
-
-  permute([]); // 从空数组开始
-  return result;
+  return result
 }
-function calcHexaState() {
+function getHexaPlanKey(plan,rates){
+  //屬性加總相同就一定得到相同的結果，用來跳過重複的計算
+  const sum = {},imdr = []
+  for (let i=0;i<plan.length;i++){
+    for (const position of hexaPositions){
+      const name = plan[i][position].name,rate = rates[i][position]
+      if (rate <= 0 || name==="") continue
+      //無視防禦是連乘的，不能相加，要保留每一段的數值
+      if (name==="imdR") imdr.push(rate)
+      else sum[name] = (sum[name] || 0) + rate
+    }
+  }
+  imdr.sort((a,b)=>a-b)
+  return Object.keys(sum).sort().map(name=>name+':'+sum[name]).join(',') + '#' + imdr.join(',')
+}
+async function calcHexaState() {
+  if (calcHexaIng.value) return
   calcHexaIng.value = true
-  hexaStateLogs.value = ''
-  if (!jobs.hasOwnProperty(currentStat.value.data.job)){
-    hexaStateLogs.value += "無職業無法計算"
-    calcHexaIng.value = false
-    return
-  }
+  try {
+    hexaStateLogs.value = ''
+    if (!jobs.hasOwnProperty(currentStat.value.data.job)){
+      hexaStateLogs.value += "無職業無法計算"
+      return
+    }
 
-  const hdns = []
-  const calcHexaData = hexaData.value.slice(0,hexaCoreNums.value)
-  for (const [index,data] of calcHexaData.entries()){
-    if (data.primary.name!==""){
-      if (hdns.indexOf(data.primary.name) >= 0){
-        hexaStateLogs.value += "多顆HEXA屬性核心的主屬性有重複，請檢查是否填寫錯誤"
-        calcHexaIng.value = false
+    const hdns = []
+    //等級欄位可能被清空成null，統一轉成數字再計算
+    const calcHexaData = hexaData.value.slice(0,hexaCoreNums.value).map(data=>({
+      primary:{level:Number(data.primary.level)||0,name:data.primary.name},
+      secondary1:{level:Number(data.secondary1.level)||0,name:data.secondary1.name},
+      secondary2:{level:Number(data.secondary2.level)||0,name:data.secondary2.name},
+    }))
+    for (const [index,data] of calcHexaData.entries()){
+      if (data.primary.name!==""){
+        if (hdns.indexOf(data.primary.name) >= 0){
+          hexaStateLogs.value += "多顆HEXA屬性核心的主屬性有重複，請檢查是否填寫錯誤"
+          return
+        }
+        hdns.push(data.primary.name)
+      }
+
+      const allLv = data.primary.level + data.secondary1.level + data.secondary2.level
+      if (allLv < 1){
+        hexaStateLogs.value += `因為第${index+1}顆HEXA屬性核心總等級小於1，所以無法計算`
         return
       }
-      hdns.push(data.primary.name)
-    }
-
-    const allLv = data.primary.level + data.secondary1.level + data.secondary2.level
-    if (allLv < 1){
-      hexaStateLogs.value += `因為第${index+1}顆HEXA屬性核心總等級小於1，所以無法計算`
-      calcHexaIng.value = false
-      return
-    }
-    if (allLv > 20){
-      hexaStateLogs.value += `第${index+1}顆HEXA屬性核心總等級大於20，是否填寫錯誤？`
-      calcHexaIng.value = false
-      return
-    }
-  }
-
-  const sourceStat = hexaStat(dupeObj(currentStat.value.data),calcHexaData,false)
-  // console.table(sourceStat)
-  const sourceResult = calcSourceData(sourceStat)
-  hexaStateLogs.value += `扣除當前HEXA屬性後的防後爆B攻為${numberFormat.value(sourceResult.defBossCriticalDamage)}`
-  const deductDiff = currentStatCalcResult.value.defBossCriticalDamage - sourceResult.defBossCriticalDamage
-  // hexaStateLogs.value +=` \n---開始計算---\n`
-
-  //計算單顆核心所有可能的組合
-  const onePlans = getOneHexaPlans()
-  const onePlansIndex = []
-  for (let i=0,l=onePlans.length;i<l;i++){
-    onePlansIndex.push(i)
-  }
-  const allPlansIndex = allHexaPlan(onePlansIndex,calcHexaData.length)
-  // console.log(onePlans)
-  // console.log(allPlansIndex)
-  // const filterPlans = []
-  let bestDiff = 0,bestBCD=0,bestCd = []
-  for (const planIndexS of allPlansIndex){
-    const usedMainNames = []
-    let hasRepeat = false
-    const plan = []
-    for (const [i,index] of planIndexS.entries()){
-      const p = onePlans[index]
-      if (usedMainNames.indexOf(p[0]) >= 0) {
-        hasRepeat = true
-        break
-      }
-      usedMainNames.push(p[0])
-      plan.push({primary:{
-          level:calcHexaData[i].primary.level,
-          name:p[0],
-        },secondary1:{
-          level:calcHexaData[i].secondary1.level,
-          name:p[1],
-        },secondary2:{
-          level:calcHexaData[i].secondary2.level,
-          name:p[2],
-        },})
-    }
-    if (hasRepeat) continue
-    const ts = hexaStat(dupeObj(sourceStat),plan)
-    const tr = calcSourceData(ts)
-    const diff = tr.defBossCriticalDamage - sourceResult.defBossCriticalDamage
-    if (diff > bestDiff){
-      bestBCD = tr.defBossCriticalDamage
-      bestDiff = diff
-      bestCd = plan
-    }
-    // filterPlans.push(plan)
-  }
-  // console.log(filterPlans)
-  // console.log(bestCd,bestDiff,bestBCD)
-
-  let currentIsBest = true
-  for (const [i,item] of calcHexaData.entries()){
-    for (const position in item){
-      if (item[position].name !== bestCd[i][position].name){
-        currentIsBest = false
-        break
+      if (allLv > 20){
+        hexaStateLogs.value += `第${index+1}顆HEXA屬性核心總等級大於20，是否填寫錯誤？`
+        return
       }
     }
-  }
 
+    const sourceStat = hexaStat(dupeObj(currentStat.value.data),calcHexaData,false)
+    // console.table(sourceStat)
+    const sourceResult = calcSourceData(sourceStat)
+    hexaStateLogs.value += `扣除當前HEXA屬性後的防後爆B攻為${numberFormat.value(sourceResult.defBossCriticalDamage)}`
+    const deductDiff = currentStatCalcResult.value.defBossCriticalDamage - sourceResult.defBossCriticalDamage
+    const baseLogs = hexaStateLogs.value
+    //buff是固定的加值，和HEXA屬性互不影響，先套用好就不用在窮舉時重複套用
+    const buffedSource = applyBuff(dupeObj(sourceStat))
 
-  hexaStateLogs.value +=` \n---計算結果---\n`
-  if (currentIsBest){
-    hexaStateLogs.value += `當前組合已是最佳組合\n`
-  }else {
-    hexaStateLogs.value += `提升最大的組合為：\n`
-    for (const [i,item] of bestCd.entries()){
-      hexaStateLogs.value += `第${i+1}顆核心：主：${props[item.primary.name]}(${item.primary.level}等)，副1：${props[item.secondary1.name]}(${item.secondary1.level}等)，副2：${props[item.secondary2.name]}(${item.secondary2.level}等)\n`
+    //每個欄位的實際加成倍率，各核心的等級是固定的，只有屬性種類會變
+    const rates = calcHexaData.map(data=>({
+      primary:hexaPrimaryRate(data.primary.level),
+      secondary1:data.secondary1.level,
+      secondary2:data.secondary2.level,
+    }))
+    const primaryPlans = getHexaPrimaryPlans(calcHexaData.length)
+    const secPlans = calcHexaData.map(data=>getHexaSecPlans({
+      secondary1:data.secondary1.level,
+      secondary2:data.secondary2.level,
+    }))
+    //重複使用同一個plan物件，避免窮舉時產生大量垃圾
+    const plan = calcHexaData.map(data=>({
+      primary:{level:data.primary.level,name:""},
+      secondary1:{level:data.secondary1.level,name:""},
+      secondary2:{level:data.secondary2.level,name:""},
+    }))
+
+    const cache = new Map()
+    let bestDiff = 0,bestBCD = 0,bestCd = []
+    function checkPlan(){
+      const key = getHexaPlanKey(plan,rates)
+      let bcd = cache.get(key)
+      if (bcd===undefined){
+        bcd = calcSourceData(hexaStat(dupeObj(buffedSource),plan),true).defBossCriticalDamage
+        cache.set(key,bcd)
+      }
+      const diff = bcd - sourceResult.defBossCriticalDamage
+      if (diff > bestDiff){
+        bestBCD = bcd
+        bestDiff = diff
+        bestCd = plan.map(core=>({
+          primary:{...core.primary},
+          secondary1:{...core.secondary1},
+          secondary2:{...core.secondary2},
+        }))
+      }
     }
-    hexaStateLogs.value += `防後爆B攻為${numberFormat.value(bestBCD)}，提升${numberFormat.value(bestDiff - deductDiff)}\n`
+    function walkSec(index){
+      if (index===plan.length){
+        checkPlan()
+        return
+      }
+      for (const [n1,n2] of secPlans[index][plan[index].primary.name]){
+        plan[index].secondary1.name = n1
+        plan[index].secondary2.name = n2
+        walkSec(index+1)
+      }
+    }
+    //以主屬性排列為單位分批計算，每批之間讓出執行緒，避免畫面卡住
+    for (const [index,primaries] of primaryPlans.entries()){
+      for (let i=0;i<primaries.length;i++){
+        plan[i].primary.name = primaries[i]
+      }
+      walkSec(0)
+      if (index < primaryPlans.length-1){
+        hexaStateLogs.value = baseLogs + `\n計算中...${Math.round((index+1)/primaryPlans.length*100)}%`
+        await new Promise(resolve=>setTimeout(resolve,0))
+      }
+    }
+    hexaStateLogs.value = baseLogs
+
+    if (bestCd.length===0){
+      hexaStateLogs.value +=` \n---計算結果---\n找不到任何有提升的組合\n`
+      return
+    }
+
+    let currentIsBest = true
+    for (const [i,item] of calcHexaData.entries()){
+      for (const position of hexaPositions){
+        if (item[position].name !== bestCd[i][position].name){
+          currentIsBest = false
+          break
+        }
+      }
+    }
+
+
+    hexaStateLogs.value +=` \n---計算結果---\n`
+    if (currentIsBest){
+      hexaStateLogs.value += `當前組合已是最佳組合\n`
+    }else {
+      hexaStateLogs.value += `提升最大的組合為：\n`
+      for (const [i,item] of bestCd.entries()){
+        hexaStateLogs.value += `第${i+1}顆核心：主：${props[item.primary.name]}(${item.primary.level}等)，副1：${props[item.secondary1.name]}(${item.secondary1.level}等)，副2：${props[item.secondary2.name]}(${item.secondary2.level}等)\n`
+      }
+      hexaStateLogs.value += `防後爆B攻為${numberFormat.value(bestBCD)}，提升${numberFormat.value(bestDiff - deductDiff)}\n`
+    }
+  } finally {
+    calcHexaIng.value = false
   }
-  calcHexaIng.value = false
 }
 
 
