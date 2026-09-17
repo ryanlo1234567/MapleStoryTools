@@ -8,7 +8,7 @@ import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  base:'/MapleStoryTools/',
+  base:'./', //改為相對路徑，靜態檔案可放在任意子目錄下發佈
   plugins: [
     vue(),
     AutoImport({

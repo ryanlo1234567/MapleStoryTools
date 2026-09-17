@@ -1,5 +1,6 @@
 <script setup>
 import SiteHeader from "./components/SiteHeader.vue";
+import SiteFooter from "./components/SiteFooter.vue";
 import {useTheme} from "@/assets/store.js";
 import { dateZhTW, zhTW } from "naive-ui";
 const theme = useTheme()
@@ -16,6 +17,8 @@ const theme = useTheme()
               <n-layout-content content-style="padding: 24px;">
                 <router-view></router-view>
               </n-layout-content>
+              <site-footer />
+
             </n-layout>
           </n-dialog-provider>
         </n-notification-provider>
